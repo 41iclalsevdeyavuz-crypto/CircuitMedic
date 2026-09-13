@@ -1,9 +1,13 @@
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 import json
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 @dataclass(frozen=True)
@@ -22,27 +26,22 @@ class SearchResult:
 
 
 def load_json_chunks(path: str | Path) -> list[Chunk]:
-    """
-    Load chunks previously extracted from a PDF by ingest.py.
-    """
     path = Path(path)
 
     data = json.loads(
         path.read_text(encoding="utf-8")
     )
 
-    chunks = []
-
-    for item in data:
-        chunks.append(
-            Chunk(
-                chunk_id=item["chunk_id"],
-                source=item["source"],
-                page=item.get("page"),
-                section=None,
-                text=item["text"],
-            )
+    chunks = [
+        Chunk(
+            chunk_id=item["chunk_id"],
+            source=item["source"],
+            page=item.get("page"),
+            section=None,
+            text=item["text"],
         )
+        for item in data
+    ]
 
     if not chunks:
         raise ValueError(
@@ -53,9 +52,6 @@ def load_json_chunks(path: str | Path) -> list[Chunk]:
 
 
 def load_markdown_chunks(path: str | Path) -> list[Chunk]:
-    """
-    Load simple level-2 markdown sections as retrievable chunks.
-    """
     path = Path(path)
 
     text = path.read_text(encoding="utf-8")
@@ -64,7 +60,10 @@ def load_markdown_chunks(path: str | Path) -> list[Chunk]:
 
     chunks = []
 
-    for index, part in enumerate(parts[1:], start=1):
+    for index, part in enumerate(
+        parts[1:],
+        start=1,
+    ):
         heading, _, body = part.partition("\n")
 
         body = body.strip()
@@ -90,42 +89,126 @@ def load_markdown_chunks(path: str | Path) -> list[Chunk]:
     return chunks
 
 
+def _chunks_fingerprint(
+    chunks: list[Chunk],
+) -> str:
+    """
+    Create a stable fingerprint so cached embeddings
+    are regenerated only when source chunks change.
+    """
+    payload = "\n".join(
+        f"{chunk.chunk_id}|{chunk.text}"
+        for chunk in chunks
+    )
+
+    return hashlib.sha256(
+        payload.encode("utf-8")
+    ).hexdigest()
+
+
 class DatasheetRetriever:
     """
-    Small deterministic TF-IDF retriever.
+    Local semantic retriever using sentence embeddings.
 
-    Supports:
-    - JSON chunks extracted from the real HC-SR04 PDF
-    - Markdown chunks for secondary references such as Arduino API notes
+    Document embeddings are cached on disk and reused
+    between analyses.
     """
 
-    def __init__(self, chunks: list[Chunk]):
+    def __init__(
+        self,
+        chunks: list[Chunk],
+        cache_path: str | Path,
+        model_name: str = MODEL_NAME,
+    ):
         if not chunks:
             raise ValueError(
-                "At least one datasheet chunk is required"
+                "At least one chunk is required"
             )
 
         self.chunks = chunks
+        self.cache_path = Path(cache_path)
+        self.model_name = model_name
 
-        self.vectorizer = TfidfVectorizer(
-            lowercase=True,
-            ngram_range=(1, 2),
-            stop_words="english",
-            sublinear_tf=True,
+        self.model = SentenceTransformer(
+            model_name
         )
 
-        self.matrix = self.vectorizer.fit_transform(
+        self.embeddings = (
+            self._load_or_create_embeddings()
+        )
+
+    def _load_or_create_embeddings(
+        self,
+    ) -> np.ndarray:
+        fingerprint = _chunks_fingerprint(
+            self.chunks
+        )
+
+        if self.cache_path.exists():
+            cached = np.load(
+                self.cache_path,
+                allow_pickle=False,
+            )
+
+            cached_fingerprint = str(
+                cached["fingerprint"].item()
+            )
+
+            cached_model = str(
+                cached["model_name"].item()
+            )
+
+            embeddings = cached["embeddings"]
+
+            if (
+                cached_fingerprint == fingerprint
+                and cached_model == self.model_name
+                and len(embeddings) == len(self.chunks)
+            ):
+                return embeddings
+
+        texts = [
             chunk.text
-            for chunk in chunks
+            for chunk in self.chunks
+        ]
+
+        embeddings = self.model.encode(
+            texts,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
         )
+
+        self.cache_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        np.savez_compressed(
+            self.cache_path,
+            embeddings=embeddings,
+            fingerprint=np.array(fingerprint),
+            model_name=np.array(self.model_name),
+        )
+
+        return embeddings
 
     @classmethod
     def from_json(
         cls,
         path: str | Path,
     ) -> "DatasheetRetriever":
+        path = Path(path)
+
+        cache_path = (
+            path.parent
+            / "embeddings"
+            / f"{path.stem}.npz"
+        )
+
         return cls(
-            load_json_chunks(path)
+            chunks=load_json_chunks(path),
+            cache_path=cache_path,
         )
 
     @classmethod
@@ -133,35 +216,64 @@ class DatasheetRetriever:
         cls,
         path: str | Path,
     ) -> "DatasheetRetriever":
+        path = Path(path)
+
+        cache_path = (
+            path.parent
+            / "embeddings"
+            / f"{path.stem}.npz"
+        )
+
         return cls(
-            load_markdown_chunks(path)
+            chunks=load_markdown_chunks(path),
+            cache_path=cache_path,
         )
 
     def search(
         self,
         query: str,
         top_k: int = 3,
+        min_score: float = 0.35,
     ) -> list[SearchResult]:
+        """
+        Semantic search.
+
+        Results below min_score are rejected instead of
+        forcing an unrelated chunk to become "evidence".
+        """
         if not query.strip():
             return []
 
-        query_vector = self.vectorizer.transform(
-            [query]
+        query_embedding = self.model.encode(
+            [query],
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )[0]
+
+        scores = (
+            self.embeddings
+            @ query_embedding
         )
 
-        scores = cosine_similarity(
-            query_vector,
-            self.matrix,
-        ).ravel()
+        order = scores.argsort()[::-1]
 
-        order = scores.argsort()[::-1][
-            :max(1, top_k)
-        ]
+        results = []
 
-        return [
-            SearchResult(
-                chunk=self.chunks[index],
-                score=float(scores[index]),
+        for index in order:
+            score = float(scores[index])
+
+            if score < min_score:
+                continue
+
+            results.append(
+                SearchResult(
+                    chunk=self.chunks[index],
+                    score=score,
+                )
             )
-            for index in order
-        ]
+
+            if len(results) >= top_k:
+                break
+
+        return results
