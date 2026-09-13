@@ -145,14 +145,31 @@ if st.button(
                 )
 
                 st.markdown(
-                    f"**Retrieved evidence — {issue.evidence.section}**"
+                    "**Retrieved evidence**"
                 )
 
                 st.info(
                     issue.evidence.text
                 )
 
+                source_parts = [
+                    f"Source: {issue.evidence.source}"
+                ]
+
+                if issue.evidence.page is not None:
+                    source_parts.append(
+                        f"page {issue.evidence.page}"
+                    )
+
+                if issue.evidence.chunk_id:
+                    source_parts.append(
+                        f"chunk {issue.evidence.chunk_id}"
+                    )
+
+                source_parts.append(
+                    f"retrieval score {issue.evidence.score:.3f}"
+                )
+
                 st.caption(
-                    f"Source: {issue.evidence.source} "
-                    f"· retrieval score {issue.evidence.score:.3f}"
+                    " · ".join(source_parts)
                 )

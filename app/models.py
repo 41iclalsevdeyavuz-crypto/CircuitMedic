@@ -3,9 +3,14 @@ from pydantic import BaseModel, Field
 
 class Evidence(BaseModel):
     source: str
-    section: str
+    page: int | None = None
+    chunk_id: str | None = None
+    section: str | None = None
     text: str
-    score: float = Field(ge=0.0, le=1.0)
+    score: float = Field(
+        ge=0.0,
+        le=1.0,
+    )
 
 class Diagnosis(BaseModel):
     title: str
