@@ -78,6 +78,8 @@ if "loaded_source" not in st.session_state:
 if "last_uploaded_name" not in st.session_state:
     st.session_state.last_uploaded_name = None
 
+if "uploader_version" not in st.session_state:
+    st.session_state.uploader_version = 0
 
 with st.sidebar:
     st.subheader("Hardware context")
@@ -133,6 +135,7 @@ if load_broken:
     )
     st.session_state.loaded_source = "broken_robot.ino"
     st.session_state.last_uploaded_name = None
+    st.session_state.uploader_version += 1
     st.rerun()
 
 
@@ -142,12 +145,14 @@ if load_fixed:
     )
     st.session_state.loaded_source = "fixed_robot.ino"
     st.session_state.last_uploaded_name = None
+    st.session_state.uploader_version += 1
     st.rerun()
 
 
 uploaded = st.file_uploader(
     "Upload firmware",
     type=["ino", "cpp", "h"],
+    key=f"firmware_uploader_{st.session_state.uploader_version}",
 )
 
 
