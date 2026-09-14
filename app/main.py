@@ -222,7 +222,7 @@ if analyze_clicked:
 
         if not report.issues:
             st.success(
-                "No supported HC-SR04 timing or timeout issue was detected."
+                "No issues were found within the currently supported HC-SR04 checks."
             )
 
         else:
