@@ -1,4 +1,5 @@
 from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -37,8 +38,18 @@ class Diagnosis(BaseModel):
     evidence_note: str | None = None
 
 
+class AIExplanationModel(BaseModel):
+    possible_cause: str
+    symptom_relationship: str
+    technical_explanation: str
+    recommended_fix: str
+    evidence_ids: list[str]
+    uncertainty: str
+
+
 class DiagnosticReport(BaseModel):
     board: str
     components: list[str]
     symptom: str
     issues: list[Diagnosis]
+    ai_explanation: AIExplanationModel | None = None

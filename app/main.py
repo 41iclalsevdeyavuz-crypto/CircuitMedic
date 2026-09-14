@@ -7,6 +7,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services.diagnostic_engine import DiagnosticEngine
+from app.services.llm_service import LLMService
 
 
 SAMPLE = (
@@ -113,6 +114,16 @@ if st.button(
         trig_symbol=trig_symbol,
         echo_symbol=echo_symbol,
     )
+
+    llm_service = LLMService()
+
+    ai_explanation = llm_service.explain(
+        report,
+        firmware,
+    )
+
+    if ai_explanation is not None:
+        report.ai_explanation = ai_explanation
 
     if not report.issues:
         st.success(
@@ -258,3 +269,71 @@ if st.button(
                         "probability that the diagnosis is correct."
                     )
                 )
+
+        st.divider()
+
+        if report.ai_explanation is not None:
+            st.subheader(
+                "🤖 AI Debugging Explanation"
+            )
+
+            ai = report.ai_explanation
+
+            st.markdown(
+                "### Possible cause"
+            )
+            st.write(
+                ai.possible_cause
+            )
+
+            st.markdown(
+                "### Relationship to the symptom"
+            )
+            st.write(
+                ai.symptom_relationship
+            )
+
+            st.markdown(
+                "### Technical explanation"
+            )
+            st.write(
+                ai.technical_explanation
+            )
+
+            st.markdown(
+                "### Recommended fix"
+            )
+            st.write(
+                ai.recommended_fix
+            )
+
+            st.markdown(
+                "### Evidence used"
+            )
+
+            if ai.evidence_ids:
+                for evidence_id in ai.evidence_ids:
+                    st.code(
+                        evidence_id,
+                        language=None,
+                    )
+            else:
+                st.info(
+                    "The AI explanation did not cite "
+                    "any document evidence."
+                )
+
+            st.markdown(
+                "### Uncertainty / additional checks"
+            )
+
+            st.write(
+                ai.uncertainty
+            )
+
+        else:
+            st.info(
+                "AI explanation could not be generated. "
+                "The rule-based diagnostic report above "
+                "is still valid and available."
+            )
