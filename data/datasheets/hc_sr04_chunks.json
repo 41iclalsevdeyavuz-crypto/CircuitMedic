@@ -1,0 +1,26 @@
+[
+  {
+    "chunk_id": "hc_sr04_original_p1_c1",
+    "source": "hc_sr04_original.pdf",
+    "page": 1,
+    "text": "Tech Support: services@elecfreaks.com \nUltrasonic Ranging Module HC - SR04 \n Product features:  \nUltrasonic ranging module HC - SR04 provides 2cm - 400cm non-contact \nmeasurement function, the ranging accuracy can reach to 3mm.\nThe modules \nincludes ultrasonic transmitters, receiver and control circuit.\nThe basic principle \nof work: \n(1) Using IO trigger for at least 10us high level signal, \n(2) The Module automatically sends eight 40 kHz and detect whether there is a \npulse signal back.\n(3) IF the signal back, through high level , time of high output IO duration is \nthe time from sending ultrasonic to returning."
+  },
+  {
+    "chunk_id": "hc_sr04_original_p1_c2",
+    "source": "hc_sr04_original.pdf",
+    "page": 1,
+    "text": "Test distance = (high level time×velocity of sound (340M/S) / 2, \n Wire connecting direct as following:  \n/circle6 5V Supply \n/circle6 Trigger Pulse Input \n/circle6 Echo Pulse Output \n/circle6 0V Ground \nElectric Parameter \nWorking Voltage DC 5 V \nWorking Current 15mA \nWorking Frequency 40Hz \nMax Range 4m \nMin Range 2cm \nMeasuringAngle 15 degree \nTrigger Input Signal 10uS TTL pulse \nEcho Output Signal Input TTL lever signal and the r ange in \nproportion \nDimension 45*20*15mm"
+  },
+  {
+    "chunk_id": "hc_sr04_original_p2_c1",
+    "source": "hc_sr04_original.pdf",
+    "page": 2,
+    "text": "Vcc Trig Echo GND\nTiming diagram \nThe Timing diagram is shown below. You only need to supply a short 10uS \npulse to the trigger input to start the ranging, and then the module will send out \nan 8 cycle burst of ultrasound at 40 kHz and raise its echo. The Echo is a \ndistance object that is pulse width and the range in proportion .You can \ncalculate the range through the time interval between sending trigger signal and \nreceiving echo signal. Formula: uS / 58 = centimeters or uS / 148 =inch; or: the \nrange = high level time * velocity (340M/S) / 2; we suggest to use over 60ms \nmeasurement cycle, in order to prevent trigger signal to the echo signal."
+  },
+  {
+    "chunk_id": "hc_sr04_original_p3_c1",
+    "source": "hc_sr04_original.pdf",
+    "page": 3,
+    "text": "Attention:  \n/circle6 The module is not suggested to connect directly to electric, if connected \nelectric, the GND terminal should be connected the module first, otherwise, \nit will affect the normal work of the module. \n/circle6 When tested objects, the range of area is n ot less than 0.5 square meters \nand the plane requests as smooth as possible, otherwise ,it will affect the \nresults of measuring.\nwww.Elecfreaks.com"
+  }
+]
