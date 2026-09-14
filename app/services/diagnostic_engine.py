@@ -21,34 +21,98 @@ ARDUINO_PULSEIN_KNOWLEDGE = (
     / "arduino_pulsein.md"
 )
 
+HC_SR04_SOURCE_URL = (
+    "https://cdn.sparkfun.com/datasheets/"
+    "Sensors/Proximity/HCSR04.pdf"
+)
+
+ARDUINO_PULSEIN_SOURCE_URL = (
+    "https://docs.arduino.cc/language-reference/"
+    "en/functions/advanced-io/pulseIn/"
+)
+
 
 RULES = {
-    "short_trigger_pulse": (
-        "HC-SR04 trigger input pulse duration minimum 10 microseconds",
-        "Trigger pulse is shorter than the HC-SR04 requirement",
-        "high",
-        .97,
-        "A trigger shorter than the documented minimum may not start a measurement, producing intermittent missed obstacles.",
-        "Hold TRIG HIGH for at least 10 microseconds, e.g. delayMicroseconds(10).",
-    ),
+    "short_trigger_pulse": {
+        "query": (
+            "HC-SR04 trigger pulse minimum duration "
+            "10 microseconds requirement"
+        ),
+        "title": (
+            "Trigger pulse is shorter than "
+            "the HC-SR04 requirement"
+        ),
+        "severity": "high",
+        "assessment": "direct_rule_match",
+        "requirement": (
+            "The HC-SR04 requires the TRIG input "
+            "to be held HIGH for at least 10 microseconds."
+        ),
+        "mismatch": (
+            "The observed trigger delay is shorter "
+            "than the documented minimum."
+        ),
+        "fix": (
+            "Hold TRIG HIGH for at least 10 microseconds, "
+            "for example delayMicroseconds(10)."
+        ),
+        "source_url": HC_SR04_SOURCE_URL,
+    },
 
-    "missing_echo_timeout": (
-        "Arduino pulseIn default timeout optional timeout parameter",
-        "Echo measurement relies on the default pulseIn timeout",
-        "high",
-        .92,
-        "pulseIn() without an explicit timeout uses Arduino's default timeout, which can be much longer than an HC-SR04 measurement cycle and may stall a real-time control loop.",
-        "Use pulseIn(echoPin, HIGH, 30000) and treat 0 as no echo.",
-    ),
+    "missing_echo_timeout": {
+        "query": (
+            "Arduino pulseIn optional timeout "
+            "default timeout behavior"
+        ),
+        "title": (
+            "Echo measurement relies on "
+            "the default pulseIn timeout"
+        ),
+        "severity": "high",
+        "assessment": "direct_rule_match",
+        "requirement": (
+            "Arduino pulseIn supports an explicit timeout. "
+            "For a responsive control loop, the waiting time "
+            "should be deliberately bounded."
+        ),
+        "mismatch": (
+            "The pulseIn call does not provide an explicit "
+            "timeout, so the control loop relies on the "
+            "default behavior."
+        ),
+        "fix": (
+            "Use pulseIn(echoPin, HIGH, 30000) "
+            "and treat 0 as no echo."
+        ),
+        "source_url": ARDUINO_PULSEIN_SOURCE_URL,
+    },
 
-    "unchecked_no_echo": (
-        "HC-SR04 no echo unavailable reading echo return",
-        "No-echo result is used as a valid distance",
-        "medium",
-        .89,
-        "A zero duration signals a timeout or no echo, not an obstacle at zero centimetres.",
-        "Check duration == 0 before converting the value to distance and enter a safe fallback state.",
-    ),
+    "unchecked_no_echo": {
+        "query": (
+            "HC-SR04 no echo unavailable reading "
+            "invalid zero distance"
+        ),
+        "title": (
+            "No-echo result is used as a valid distance"
+        ),
+        "severity": "medium",
+        "assessment": "possible_issue",
+        "requirement": (
+            "A missing echo should be treated as an "
+            "unavailable measurement rather than as a "
+            "valid zero-centimetre distance."
+        ),
+        "mismatch": (
+            "The measured duration can be used in the "
+            "distance calculation without first handling "
+            "the no-echo case."
+        ),
+        "fix": (
+            "Check duration == 0 before converting the "
+            "value to distance and enter a safe fallback state."
+        ),
+        "source_url": HC_SR04_SOURCE_URL,
+    },
 }
 
 
@@ -61,8 +125,52 @@ class DiagnosticEngine:
             knowledge_path
         )
 
-        self.arduino_retriever = DatasheetRetriever.from_markdown(
-            ARDUINO_PULSEIN_KNOWLEDGE
+        self.arduino_retriever = (
+            DatasheetRetriever.from_markdown(
+                ARDUINO_PULSEIN_KNOWLEDGE
+            )
+        )
+
+    def _retrieve_evidence(
+        self,
+        finding: Finding,
+        query: str,
+        source_url: str,
+    ) -> tuple[Evidence | None, str | None]:
+
+        if finding.kind == "missing_echo_timeout":
+            results = self.arduino_retriever.search(
+                query,
+                1,
+            )
+        else:
+            results = self.retriever.search(
+                query,
+                1,
+            )
+
+        if not results:
+            return (
+                None,
+                (
+                    "No sufficiently relevant document evidence "
+                    "was found. Manual review is recommended."
+                ),
+            )
+
+        result = results[0]
+
+        return (
+            Evidence(
+                source=result.chunk.source,
+                source_url=source_url,
+                page=result.chunk.page,
+                chunk_id=result.chunk.chunk_id,
+                section=result.chunk.section,
+                text=result.chunk.text,
+                score=round(result.score, 3),
+            ),
+            None,
         )
 
     def _diagnosis(
@@ -70,41 +178,31 @@ class DiagnosticEngine:
         finding: Finding,
         filename: str,
     ) -> Diagnosis:
-        (
-            query,
-            title,
-            severity,
-            confidence,
-            explanation,
-            fix,
-        ) = RULES[finding.kind]
 
-        if finding.kind == "missing_echo_timeout":
-            result = self.arduino_retriever.search(
-                query,
-                1,
-            )[0]
-        else:
-            result = self.retriever.search(
-                query,
-                1,
-            )[0]
+        rule = RULES[finding.kind]
+
+        evidence, evidence_note = self._retrieve_evidence(
+            finding,
+            rule["query"],
+            rule["source_url"],
+        )
+
+        assessment = rule["assessment"]
+
+        if evidence is None:
+            assessment = "manual_review_required"
 
         return Diagnosis(
-            title=title,
-            severity=severity,
-            confidence=confidence,
+            title=rule["title"],
+            severity=rule["severity"],
+            assessment=assessment,
             code_location=f"{filename}:{finding.line}",
-            explanation=explanation,
-            suggested_fix=fix,
-            evidence=Evidence(
-                source=result.chunk.source,
-                page=result.chunk.page,
-                chunk_id=result.chunk.chunk_id,
-                section=result.chunk.section,
-                text=result.chunk.text,
-                score=round(result.score, 3),
-            ),
+            observed_condition=finding.observed,
+            documented_requirement=rule["requirement"],
+            mismatch=rule["mismatch"],
+            suggested_fix=rule["fix"],
+            evidence=evidence,
+            evidence_note=evidence_note,
         )
 
     def analyze(
@@ -115,6 +213,7 @@ class DiagnosticEngine:
         trig_symbol: str = "trigPin",
         echo_symbol: str = "echoPin",
     ) -> DiagnosticReport:
+
         issues = [
             self._diagnosis(
                 finding,

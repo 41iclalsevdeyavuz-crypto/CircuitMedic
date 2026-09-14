@@ -17,6 +17,7 @@ SAMPLE = (
     / "broken_robot.ino"
 )
 
+
 st.set_page_config(
     page_title="CircuitMedic",
     page_icon="🩺",
@@ -24,7 +25,9 @@ st.set_page_config(
 )
 
 st.title("🩺 CircuitMedic")
-st.caption("Evidence-grounded debugging for Arduino + HC-SR04 firmware")
+st.caption(
+    "Evidence-grounded debugging for Arduino + HC-SR04 firmware"
+)
 
 
 with st.sidebar:
@@ -44,13 +47,19 @@ with st.sidebar:
     trig_symbol = st.text_input(
         "TRIG pin symbol",
         value="trigPin",
-        help="Variable name used for the HC-SR04 TRIG pin in the firmware.",
+        help=(
+            "Variable name used for the HC-SR04 "
+            "TRIG pin in the firmware."
+        ),
     )
 
     echo_symbol = st.text_input(
         "ECHO pin symbol",
         value="echoPin",
-        help="Variable name used for the HC-SR04 ECHO pin in the firmware.",
+        help=(
+            "Variable name used for the HC-SR04 "
+            "ECHO pin in the firmware."
+        ),
     )
 
     load_sample = st.button(
@@ -71,8 +80,8 @@ uploaded = st.file_uploader(
 
 
 if uploaded:
-    st.session_state.firmware = uploaded.getvalue().decode(
-        "utf-8"
+    st.session_state.firmware = (
+        uploaded.getvalue().decode("utf-8")
     )
 
 
@@ -85,7 +94,10 @@ firmware = st.text_area(
 
 symptom = st.text_input(
     "Observed symptom",
-    "My obstacle avoidance robot occasionally fails to detect objects and crashes.",
+    (
+        "My obstacle avoidance robot occasionally "
+        "fails to detect objects and crashes."
+    ),
 )
 
 
@@ -112,6 +124,12 @@ if st.button(
             f"Analysis complete — {len(report.issues)} issues"
         )
 
+        assessment_labels = {
+            "direct_rule_match": "Direct rule match",
+            "possible_issue": "Possible issue",
+            "manual_review_required": "Manual review required",
+        }
+
         for issue in report.issues:
             icon = {
                 "high": "🔴",
@@ -120,14 +138,19 @@ if st.button(
             }[issue.severity]
 
             with st.expander(
-                f"{icon} {issue.severity.upper()} · {issue.title}",
+                (
+                    f"{icon} {issue.severity.upper()} "
+                    f"· {issue.title}"
+                ),
                 expanded=True,
             ):
                 left, right = st.columns(2)
 
                 left.metric(
-                    "Confidence",
-                    f"{issue.confidence:.0%}",
+                    "Assessment",
+                    assessment_labels[
+                        issue.assessment
+                    ],
                 )
 
                 right.metric(
@@ -135,9 +158,34 @@ if st.button(
                     issue.code_location,
                 )
 
-                st.write(issue.explanation)
+                st.markdown(
+                    "**1. Observed in code**"
+                )
 
-                st.markdown("**Suggested fix**")
+                st.code(
+                    issue.observed_condition,
+                    language=None,
+                )
+
+                st.markdown(
+                    "**2. Documented requirement**"
+                )
+
+                st.write(
+                    issue.documented_requirement
+                )
+
+                st.markdown(
+                    "**3. Why this is a mismatch**"
+                )
+
+                st.write(
+                    issue.mismatch
+                )
+
+                st.markdown(
+                    "**4. Suggested fix**"
+                )
 
                 st.code(
                     issue.suggested_fix,
@@ -145,31 +193,68 @@ if st.button(
                 )
 
                 st.markdown(
-                    "**Retrieved evidence**"
+                    "**Document evidence**"
                 )
 
-                st.info(
-                    issue.evidence.text
-                )
-
-                source_parts = [
-                    f"Source: {issue.evidence.source}"
-                ]
-
-                if issue.evidence.page is not None:
-                    source_parts.append(
-                        f"page {issue.evidence.page}"
+                if issue.evidence is None:
+                    st.warning(
+                        issue.evidence_note
+                        or (
+                            "No relevant document evidence "
+                            "was found."
+                        )
                     )
 
-                if issue.evidence.chunk_id:
-                    source_parts.append(
-                        f"chunk {issue.evidence.chunk_id}"
+                else:
+                    st.info(
+                        issue.evidence.text
                     )
 
-                source_parts.append(
-                    f"retrieval score {issue.evidence.score:.3f}"
-                )
+                    source_parts = [
+                        (
+                            "Source: "
+                            f"{issue.evidence.source}"
+                        )
+                    ]
+
+                    if issue.evidence.page is not None:
+                        source_parts.append(
+                            (
+                                "page "
+                                f"{issue.evidence.page}"
+                            )
+                        )
+
+                    if issue.evidence.chunk_id:
+                        source_parts.append(
+                            (
+                                "chunk "
+                                f"{issue.evidence.chunk_id}"
+                            )
+                        )
+
+                    source_parts.append(
+                        (
+                            "retrieval similarity "
+                            f"{issue.evidence.score:.3f}"
+                        )
+                    )
+
+                    st.caption(
+                        " · ".join(source_parts)
+                    )
+
+                    if issue.evidence.source_url:
+                        st.link_button(
+                            "Open source document",
+                            issue.evidence.source_url,
+                        )
 
                 st.caption(
-                    " · ".join(source_parts)
+                    (
+                        "Retrieval similarity measures how "
+                        "closely the document passage matches "
+                        "the search query. It is not the "
+                        "probability that the diagnosis is correct."
+                    )
                 )
