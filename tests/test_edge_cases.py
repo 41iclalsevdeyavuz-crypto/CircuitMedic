@@ -111,3 +111,108 @@ void loop() {
 
     assert "unchecked_no_echo" not in kinds
     assert "missing_echo_timeout" not in kinds
+
+def test_zero_check_without_flow_termination_still_warns():
+    firmware = """
+const int echoPin = 10;
+
+void loop() {
+  long duration = pulseIn(echoPin, HIGH, 30000);
+
+  if (duration == 0) {
+    Serial.println("No echo");
+  }
+
+  float distanceCm = duration / 58.0;
+}
+"""
+
+    findings = analyze_hc_sr04(
+        firmware,
+        trig_symbol="trigPin",
+        echo_symbol="echoPin",
+    )
+
+    kinds = {
+        finding.kind
+        for finding in findings
+    }
+
+    assert "unchecked_no_echo" in kinds
+
+
+def test_positive_guard_with_conversion_outside_still_warns():
+    firmware = """
+const int echoPin = 10;
+
+void loop() {
+  long duration = pulseIn(echoPin, HIGH, 30000);
+
+  if (duration != 0) {
+    Serial.println("Echo received");
+  }
+
+  float distanceCm = duration / 58.0;
+}
+"""
+
+    findings = analyze_hc_sr04(
+        firmware,
+        trig_symbol="trigPin",
+        echo_symbol="echoPin",
+    )
+
+    kinds = {
+        finding.kind
+        for finding in findings
+    }
+
+    assert "unchecked_no_echo" in kinds
+
+def test_short_trigger_on_single_line_is_detected():
+    firmware = """
+const int trigPin = 9;
+
+void loop() {
+  digitalWrite(trigPin, HIGH); delayMicroseconds(4); digitalWrite(trigPin, LOW);
+}
+"""
+
+    findings = analyze_hc_sr04(
+        firmware,
+        trig_symbol="trigPin",
+        echo_symbol="echoPin",
+    )
+
+    kinds = {
+        finding.kind
+        for finding in findings
+    }
+
+    assert "short_trigger_pulse" in kinds
+
+
+def test_multiple_constant_trigger_delays_are_summed():
+    firmware = """
+const int trigPin = 9;
+
+void loop() {
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(5);
+  delayMicroseconds(5);
+  digitalWrite(trigPin, LOW);
+}
+"""
+
+    findings = analyze_hc_sr04(
+        firmware,
+        trig_symbol="trigPin",
+        echo_symbol="echoPin",
+    )
+
+    kinds = {
+        finding.kind
+        for finding in findings
+    }
+
+    assert "short_trigger_pulse" not in kinds

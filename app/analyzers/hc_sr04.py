@@ -58,54 +58,184 @@ def _has_valid_no_echo_guard(
     """
     Recognizes a few simple no-echo guard styles after pulseIn().
 
-    Supported examples:
+    Supported safe patterns include:
+
+        if (duration == 0) {
+            return;
+        }
+
         if (duration == 0) return;
-        if (duration <= 0) return;
+
         if (duration != 0) {
             distance = duration / 58.0;
         }
 
-    This is intentionally conservative rather than pretending to fully parse C++.
+    A check is not considered safe if execution can continue
+    into an unguarded distance conversion.
+
+    This is intentionally conservative and does not attempt
+    to fully parse arbitrary C++ control flow.
     """
     escaped = re.escape(variable)
 
-    # Only inspect a small region after the pulseIn assignment.
-    following = lines[pulse_line_index + 1:pulse_line_index + 12]
-    text = "\n".join(following)
-
-    invalid_guard_patterns = [
-        rf"if\s*\(\s*{escaped}\s*==\s*0\s*\)",
-        rf"if\s*\(\s*{escaped}\s*<=\s*0\s*\)",
-        rf"if\s*\(\s*!\s*{escaped}\s*\)",
+    following = lines[
+        pulse_line_index + 1:
+        pulse_line_index + 16
     ]
 
-    for pattern in invalid_guard_patterns:
-        match = re.search(pattern, text)
-        if match:
-            # Guard exists before likely distance conversion.
-            guard_pos = match.start()
-            conversion = re.search(
-                rf"\b{escaped}\b\s*/|"
-                rf"\b{escaped}\b\s*\*",
-                text,
-            )
-            if conversion is None or guard_pos < conversion.start():
-                return True
+    text = "\n".join(following)
 
+    conversion_pattern = re.compile(
+        rf"\b{escaped}\b\s*/|"
+        rf"\b{escaped}\b\s*\*"
+    )
+
+    first_conversion = conversion_pattern.search(
+        text
+    )
+
+    # Pattern 1:
+    # if (duration == 0) return;
+    # if (duration <= 0) return;
+    # if (!duration) return;
+    inline_terminating_guard = re.search(
+        (
+            rf"if\s*\(\s*(?:"
+            rf"{escaped}\s*==\s*0|"
+            rf"{escaped}\s*<=\s*0|"
+            rf"!\s*{escaped}"
+            rf")\s*\)"
+            rf"\s*"
+            rf"(?:return\b[^;]*;|continue\s*;|break\s*;)"
+        ),
+        text,
+        re.DOTALL,
+    )
+
+    if inline_terminating_guard:
+        if (
+            first_conversion is None
+            or inline_terminating_guard.start()
+            < first_conversion.start()
+        ):
+            return True
+
+    # Pattern 2:
+    # if (duration == 0) {
+    #     ...
+    #     return;
+    # }
+    zero_guard = re.search(
+        (
+            rf"if\s*\(\s*(?:"
+            rf"{escaped}\s*==\s*0|"
+            rf"{escaped}\s*<=\s*0|"
+            rf"!\s*{escaped}"
+            rf")\s*\)"
+            rf"\s*\{{"
+        ),
+        text,
+    )
+
+    if zero_guard:
+        open_brace = text.find(
+            "{",
+            zero_guard.start(),
+        )
+
+        if open_brace != -1:
+            depth = 0
+            close_brace = None
+
+            for pos in range(
+                open_brace,
+                len(text),
+            ):
+                if text[pos] == "{":
+                    depth += 1
+
+                elif text[pos] == "}":
+                    depth -= 1
+
+                    if depth == 0:
+                        close_brace = pos
+                        break
+
+            if close_brace is not None:
+                guard_body = text[
+                    open_brace + 1:
+                    close_brace
+                ]
+
+                terminates_flow = re.search(
+                    r"\breturn\b[^;]*;|"
+                    r"\bcontinue\s*;|"
+                    r"\bbreak\s*;",
+                    guard_body,
+                )
+
+                if terminates_flow:
+                    if (
+                        first_conversion is None
+                        or zero_guard.start()
+                        < first_conversion.start()
+                    ):
+                        return True
+
+    # Pattern 3:
+    # if (duration != 0) {
+    #     distance = duration / 58.0;
+    # }
+    #
+    # The conversion itself must be inside the positive guard.
     positive_guard = re.search(
-        rf"if\s*\(\s*{escaped}\s*(?:!=|>)\s*0\s*\)",
+        (
+            rf"if\s*\(\s*"
+            rf"{escaped}\s*(?:!=|>)\s*0"
+            rf"\s*\)"
+            rf"\s*\{{"
+        ),
         text,
     )
 
     if positive_guard:
-        # Accept a positive guard if duration use follows the guard.
-        after_guard = text[positive_guard.end():]
-        if re.search(
-            rf"\b{escaped}\b\s*/|"
-            rf"\b{escaped}\b\s*\*",
-            after_guard,
-        ):
-            return True
+        open_brace = text.find(
+            "{",
+            positive_guard.start(),
+        )
+
+        if open_brace != -1:
+            depth = 0
+            close_brace = None
+
+            for pos in range(
+                open_brace,
+                len(text),
+            ):
+                if text[pos] == "{":
+                    depth += 1
+
+                elif text[pos] == "}":
+                    depth -= 1
+
+                    if depth == 0:
+                        close_brace = pos
+                        break
+
+            if close_brace is not None:
+                guard_body = text[
+                    open_brace + 1:
+                    close_brace
+                ]
+
+                guarded_conversion = (
+                    conversion_pattern.search(
+                        guard_body
+                    )
+                )
+
+                if guarded_conversion:
+                    return True
 
     return False
 
@@ -123,31 +253,107 @@ def analyze_hc_sr04(
     trig_escaped = re.escape(trig_symbol)
     echo_escaped = re.escape(echo_symbol)
 
-    # A. Only treat HIGH writes to the selected TRIG symbol as trigger pulses.
-    for index, line in enumerate(lines):
-        if re.search(
-            rf"digitalWrite\s*\(\s*{trig_escaped}\s*,\s*HIGH\s*\)\s*;",
-            line,
-        ):
-            for offset, next_line in enumerate(
-                lines[index + 1:index + 5],
-                start=1,
-            ):
-                match = re.search(
-                    r"delayMicroseconds\s*\(\s*(\d+)\s*\)",
-                    next_line,
+        # A. Analyze the selected TRIG pin between HIGH and the next LOW.
+    # Constant delayMicroseconds() calls in that interval are summed.
+    #
+    # This supports both:
+    #
+    # digitalWrite(trigPin, HIGH);
+    # delayMicroseconds(4);
+    # digitalWrite(trigPin, LOW);
+    #
+    # and:
+    #
+    # digitalWrite(trigPin, HIGH); delayMicroseconds(4); digitalWrite(trigPin, LOW);
+
+    trigger_high_pattern = re.compile(
+        rf"digitalWrite\s*\(\s*{trig_escaped}\s*,\s*HIGH\s*\)\s*;"
+    )
+
+    trigger_low_pattern = re.compile(
+        rf"digitalWrite\s*\(\s*{trig_escaped}\s*,\s*LOW\s*\)\s*;"
+    )
+
+    delay_pattern = re.compile(
+        r"delayMicroseconds\s*\(\s*([^)]+?)\s*\)"
+    )
+
+    # Search the cleaned source as one string so statements on the
+    # same physical line are handled correctly.
+    for high_match in trigger_high_pattern.finditer(cleaned):
+        low_match = trigger_low_pattern.search(
+            cleaned,
+            high_match.end(),
+        )
+
+        if low_match is None:
+            continue
+
+        between = cleaned[
+            high_match.end():
+            low_match.start()
+        ]
+
+        delays = list(
+            delay_pattern.finditer(between)
+        )
+
+        if not delays:
+            # Without an explicit constant delay we do not make
+            # a definite timing claim.
+            continue
+
+        total_delay = 0
+        all_constant = True
+
+        for delay_match in delays:
+            argument = delay_match.group(1).strip()
+
+            if not argument.isdigit():
+                all_constant = False
+                break
+
+            total_delay += int(argument)
+
+        if not all_constant:
+            # Variable or complex timing requires manual review;
+            # do not emit a definite short-pulse diagnosis.
+            continue
+
+        if total_delay < 10:
+            first_delay = delays[0]
+
+            absolute_delay_position = (
+                high_match.end()
+                + first_delay.start()
+            )
+
+            line_number = (
+                cleaned.count(
+                    "\n",
+                    0,
+                    absolute_delay_position,
+                )
+                + 1
+            )
+
+            if len(delays) == 1:
+                observed = (
+                    f"delayMicroseconds({total_delay})"
+                )
+            else:
+                observed = (
+                    f"Total explicit TRIG HIGH delay: "
+                    f"{total_delay} microseconds"
                 )
 
-                if match:
-                    if int(match.group(1)) < 10:
-                        findings.append(
-                            Finding(
-                                "short_trigger_pulse",
-                                index + offset + 1,
-                                match.group(0),
-                            )
-                        )
-                    break
+            findings.append(
+                Finding(
+                    "short_trigger_pulse",
+                    line_number,
+                    observed,
+                )
+            )
 
     # B. Ignore commented-out pulseIn() calls.
     # Also limit timeout detection to the configured ECHO symbol.

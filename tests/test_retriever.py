@@ -18,7 +18,15 @@ def test_trigger_query_retrieves_trigger_chunk():
 
     assert best.chunk.source == "hc_sr04_original.pdf"
     assert best.chunk.page in (1, 2)
-    assert "trigger" in best.chunk.text.lower()
+
+    evidence_text = best.chunk.text.lower()
+
+    assert "trigger" in evidence_text
+    assert (
+        "10us" in evidence_text
+        or "10 us" in evidence_text
+    )
+
     assert best.score >= 0.35
 
 

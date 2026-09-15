@@ -89,8 +89,8 @@ RULES = {
 
     "unchecked_no_echo": {
         "query": (
-            "HC-SR04 no echo unavailable reading "
-            "invalid zero distance"
+            "Arduino pulseIn returns zero when timeout expires "
+            "no pulse received"
         ),
         "title": (
             "No-echo result is used as a valid distance"
@@ -98,20 +98,22 @@ RULES = {
         "severity": "medium",
         "assessment": "possible_issue",
         "requirement": (
-            "A missing echo should be treated as an "
-            "unavailable measurement rather than as a "
-            "valid zero-centimetre distance."
+            "Arduino pulseIn returns 0 when a pulse is not "
+            "received before the timeout expires. "
+            "That result should be handled before converting "
+            "the duration into a distance measurement."
         ),
         "mismatch": (
             "The measured duration can be used in the "
             "distance calculation without first handling "
-            "the no-echo case."
+            "the zero timeout result."
         ),
         "fix": (
             "Check duration == 0 before converting the "
-            "value to distance and enter a safe fallback state."
+            "value to distance, then choose an application-"
+            "appropriate fallback behavior."
         ),
-        "source_url": HC_SR04_SOURCE_URL,
+        "source_url": ARDUINO_PULSEIN_SOURCE_URL,
     },
 }
 
@@ -138,7 +140,10 @@ class DiagnosticEngine:
         source_url: str,
     ) -> tuple[Evidence | None, str | None]:
 
-        if finding.kind == "missing_echo_timeout":
+        if finding.kind in {
+            "missing_echo_timeout",
+            "unchecked_no_echo",
+        }:
             results = self.arduino_retriever.search(
                 query,
                 1,

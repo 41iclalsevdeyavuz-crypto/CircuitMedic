@@ -25,7 +25,7 @@ Finding these problems normally requires comparing firmware with datasheets and 
 
 CircuitMedic brings those steps into one debugging workflow:
 
-**Firmware → static checks → documentation retrieval → evidence-backed diagnosis → optional AI explanation**
+**Firmware → deterministic checks → documentation retrieval → evidence-backed diagnosis → optional AI explanation**
 
 ---
 
@@ -49,7 +49,7 @@ The analyzer intentionally has a narrow scope so that findings can be explained 
 
 ## What CircuitMedic Does
 
-### 1. Firmware Analysis
+### 1. Deterministic Firmware Analysis
 
 CircuitMedic performs deterministic checks for supported HC-SR04 failure patterns.
 
@@ -60,6 +60,10 @@ Current checks include:
 - supported cases where a no-echo result may be used without being handled.
 
 The analyzer also avoids several known false positives, including unrelated LED `HIGH` operations and code inside comments.
+
+For supported no-echo patterns, CircuitMedic distinguishes between merely checking a value and actually preventing an invalid zero-duration result from being used in a distance calculation.
+
+Trigger timing analysis also handles supported single-line sequences and multiple constant delays between the TRIG `HIGH` and `LOW` operations.
 
 ---
 
@@ -89,23 +93,30 @@ Chunk: hc_sr04_original_p1_c1
 
 ---
 
-### 3. Embedding-Based Retrieval
+### 3. Embedding-Based Documentation Retrieval
 
-CircuitMedic uses a small local semantic index for documentation retrieval.
+CircuitMedic uses local semantic retrieval to connect analyzer findings with relevant technical documentation.
 
-PDF chunks are converted into embeddings and cached locally so they do not need to be regenerated for every analysis.
+PDF and reference chunks are converted into embeddings. Document embeddings are cached locally so they do not need to be regenerated for every analysis.
+
+The SentenceTransformer model instance is also reused within the running Python process instead of being repeatedly initialized for each retriever.
 
 When the analyzer detects an issue, CircuitMedic searches for documentation relevant to that specific finding.
 
 The retrieval layer includes a relevance threshold so an unrelated query is not automatically presented as evidence.
 
-A separate Arduino `pulseIn()` reference is used for API-specific behavior instead of incorrectly attributing that behavior to the HC-SR04 datasheet.
+CircuitMedic deliberately separates different evidence sources:
+
+- the HC-SR04 datasheet supports sensor-specific requirements such as trigger timing,
+- the Arduino `pulseIn()` reference supports API-specific behavior such as timeout and zero-return semantics.
+
+This prevents API behavior from being incorrectly attributed to the sensor datasheet.
 
 ---
 
 ### 4. Evidence-Grounded Diagnoses
 
-Each supported finding is presented as a chain:
+Each supported finding is presented as a traceable chain:
 
 ```text
 Observed code
@@ -133,13 +144,15 @@ Findings instead use interpretable assessment labels such as:
 - **Possible issue**
 - **Manual review required**
 
+If sufficiently relevant evidence cannot be retrieved, CircuitMedic does not force an unrelated passage to become evidence.
+
 ---
 
-### 5. Optional AI Debugging Explanation
+### 5. Optional Evidence-Grounded AI Explanation
 
 CircuitMedic can optionally use an OpenAI model to explain the deterministic findings in the context of the user's reported symptom.
 
-The model receives:
+The AI layer receives:
 
 - observed symptom,
 - board and component context,
@@ -158,11 +171,13 @@ The structured AI response contains:
 - evidence IDs used,
 - uncertainty or additional checks.
 
-The AI layer is not responsible for inventing new analyzer findings.
+The AI layer is **not responsible for inventing new analyzer findings**.
 
-Evidence IDs returned by the model are validated against the evidence supplied to it.
+CircuitMedic validates evidence IDs returned by the model against the evidence actually supplied to it. If an AI response cites an unknown evidence ID, the explanation is rejected rather than silently removing the invalid citation while keeping potentially unsupported generated text.
 
-If the API is unavailable, CircuitMedic continues to show the deterministic evidence-backed report instead of failing.
+The deterministic diagnostic report remains independent from the AI layer. If the API is unavailable, times out, or the AI explanation fails validation, the evidence-backed analyzer report remains available.
+
+AI explanation generation is also skipped when the deterministic analyzer produces no findings.
 
 ---
 
@@ -192,11 +207,21 @@ Click:
 
 The corrected example uses the supported fixes, allowing the user to compare the before/after behavior of the analyzer.
 
-You can also edit firmware directly in the application and analyze the modified version again.
+You can also:
 
-This makes the core demo:
+- upload firmware,
+- edit firmware directly in the browser,
+- re-upload a modified file with the same filename,
+- switch between uploaded firmware and built-in examples,
+- re-run the analysis after changing the code,
+- optionally generate an AI explanation,
+- download the structured report as JSON.
 
-**Detect → understand → fix → re-analyze**
+The analyzed report is kept together with the input snapshot that produced it, preventing an old diagnosis from being presented as though it belonged to newly edited code.
+
+The core demo is:
+
+**Detect → retrieve evidence → understand → fix → re-analyze**
 
 ---
 
@@ -239,7 +264,7 @@ The embedding model may be downloaded the first time the retrieval system is ini
 
 An OpenAI API key is **optional**.
 
-The deterministic analyzer, documentation retrieval, and evidence-backed findings can still operate without the AI explanation layer.
+The deterministic analyzer, documentation retrieval, and evidence-backed findings can operate without the AI explanation layer.
 
 To enable AI explanations, create a `.env` file in the repository root:
 
@@ -258,7 +283,7 @@ An example configuration is provided in:
 
 Do not commit your real `.env` file or API key.
 
-If the API call fails, CircuitMedic falls back to the rule-based diagnostic report.
+The API client uses a bounded timeout and limited retry behavior. If AI explanation generation fails, CircuitMedic preserves the deterministic diagnostic report.
 
 ---
 
@@ -280,16 +305,31 @@ Then open the local Streamlit address displayed in the terminal.
 python -m pytest -q
 ```
 
-The test suite covers important MVP scenarios including:
+The automated test suite covers important MVP scenarios including:
 
-- broken robot detection,
-- corrected robot behavior,
-- unrelated LED code,
-- commented-out firmware,
-- supported no-echo guards,
-- irrelevant documentation queries,
-- AI API fallback behavior,
-- edited firmware re-analysis behavior.
+- detection of supported issues in the broken HC-SR04 robot example,
+- removal of supported findings in the corrected example,
+- unrelated LED-only firmware without false HC-SR04 findings,
+- commented-out firmware being ignored,
+- valid and invalid no-echo handling patterns,
+- no-echo checks that do not actually stop invalid data flow,
+- single-line HC-SR04 trigger timing cases,
+- multiple constant trigger delays,
+- rejection of irrelevant documentation queries,
+- retrieval of HC-SR04 trigger documentation,
+- use of the Arduino `pulseIn()` reference for no-echo behavior,
+- rejection of AI explanations containing unknown evidence IDs.
+
+The Streamlit demo workflow is also manually checked before release, including:
+
+- switching between uploaded firmware and built-in broken/fixed examples,
+- re-uploading a file with the same filename but different contents,
+- editing firmware and re-running analysis,
+- preserving the analyzed report and its input snapshot across Streamlit reruns,
+- downloading the JSON report for the displayed analysis,
+- keeping the deterministic diagnostic report available when AI explanation generation is unavailable.
+
+Passing tests validate the currently supported CircuitMedic checks. They do **not** imply that arbitrary firmware or hardware is completely safe or defect-free.
 
 ---
 
@@ -297,7 +337,14 @@ The test suite covers important MVP scenarios including:
 
 After analysis, the structured diagnostic report can be downloaded as JSON.
 
-The report contains the detected issues, evidence metadata, assessment information, and AI explanation when one was successfully generated.
+The report contains:
+
+- detected issues,
+- code locations,
+- assessment information,
+- documentation evidence and metadata,
+- retrieved evidence IDs,
+- and the AI explanation when one was successfully generated and validated.
 
 ---
 
@@ -307,10 +354,10 @@ The report contains the detected issues, evidence metadata, assessment informati
 Arduino Firmware
        │
        ▼
-HC-SR04 Static Analyzer
+Deterministic HC-SR04 Analyzer
        │
        ├── Trigger timing rules
-       ├── pulseIn timeout checks
+       ├── pulseIn() timeout checks
        └── No-echo handling checks
        │
        ▼
@@ -320,7 +367,7 @@ Evidence Query
 Embedding-Based Local Retriever
        │
        ├── HC-SR04 Datasheet PDF Chunks
-       └── Arduino pulseIn Reference
+       └── Arduino pulseIn() Reference
        │
        ▼
 Evidence-Grounded Diagnostic Report
@@ -331,12 +378,26 @@ Evidence-Grounded Diagnostic Report
        ├── Suggested fix
        └── Source / page / chunk
        │
-       ▼
-Optional LLM Explanation
+       ├──────────────────────┐
+       │                      │
+       ▼                      ▼
+Base Report            Optional LLM Explanation
+                              │
+                              ▼
+                     Evidence-ID Validation
+                              │
+                              ▼
+                     Validated AI Explanation
        │
-       ▼
-Streamlit UI + JSON Report
+       └──────────────┬───────┘
+                      ▼
+              Streamlit UI
+                      │
+                      ▼
+                 JSON Report
 ```
+
+The AI layer augments the deterministic report rather than replacing it.
 
 ---
 
@@ -349,11 +410,14 @@ Current limitations include:
 - Only HC-SR04-specific checks are implemented.
 - Arduino Uno is the currently supported board context.
 - The analyzer does not perform complete C++ parsing or full program analysis.
-- Complex control flow may require manual review.
+- Complex or dynamic control flow may require manual review.
+- Trigger timing analysis is designed for supported constant-delay patterns rather than arbitrary timing expressions.
 - Pin roles are supplied through TRIG/ECHO symbol names rather than inferred from arbitrary firmware.
 - The tool does not verify electrical wiring or physical hardware faults.
 - Retrieval is limited to the documentation included in the project.
-- AI explanations depend on external API availability and should not override deterministic evidence.
+- AI explanations depend on external API availability.
+- A valid evidence ID does not by itself prove that every generated sentence is supported by the cited passage.
+- AI explanations should not override deterministic evidence.
 - A report with no findings means **no issue was found within the currently supported checks**; it does not guarantee that the firmware or hardware is completely correct or safe.
 
 ---
@@ -398,6 +462,11 @@ CircuitMedic/
 │       └── circuitmedic-demo.png
 │
 ├── tests/
+│   ├── test_diagnostic_engine.py
+│   ├── test_edge_cases.py
+│   ├── test_llm_service.py
+│   └── test_retriever.py
+│
 ├── .env.example
 ├── requirements.txt
 └── README.md
@@ -414,3 +483,7 @@ The goal is narrower:
 > **Turn embedded debugging findings into traceable explanations backed by the code and the documentation engineers actually use.**
 
 For the current MVP, that workflow is demonstrated end-to-end with Arduino Uno and HC-SR04 firmware.
+
+Future versions can extend the same architecture to additional sensors, boards, motor drivers, and more advanced firmware analysis without changing the core principle:
+
+**deterministic detection first, technical evidence second, AI explanation last.**

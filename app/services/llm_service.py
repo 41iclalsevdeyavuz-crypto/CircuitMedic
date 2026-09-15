@@ -36,8 +36,54 @@ class LLMService:
 
         if self.api_key:
             self.client = OpenAI(
-                api_key=self.api_key
+                api_key=self.api_key,
+                timeout=25.0,
+                max_retries=1,
             )
+
+    def _collect_evidence_ids(
+        self,
+        report: DiagnosticReport,
+    ) -> list[str]:
+        evidence_ids = []
+
+        for issue in report.issues:
+            if (
+                issue.evidence is not None
+                and issue.evidence.chunk_id
+            ):
+                evidence_ids.append(
+                    issue.evidence.chunk_id
+                )
+
+        return evidence_ids
+
+    def _validate_evidence_ids(
+        self,
+        explanation: AIExplanation,
+        valid_evidence_ids: list[str],
+    ) -> bool:
+        """
+        Reject the complete AI explanation if it cites
+        evidence that was not supplied to the model.
+
+        A valid ID does not prove that every generated
+        sentence is supported by that evidence, but this
+        prevents fabricated evidence identifiers from
+        being silently accepted.
+        """
+
+        valid_ids = set(
+            valid_evidence_ids
+        )
+
+        cited_ids = set(
+            explanation.evidence_ids
+        )
+
+        return cited_ids.issubset(
+            valid_ids
+        )
 
     def explain(
         self,
@@ -48,14 +94,15 @@ class LLMService:
         if not self.client:
             return None
 
-        evidence_ids = []
+        # There is nothing useful for the LLM to
+        # explain when the deterministic analyzer
+        # produced no findings.
+        if not report.issues:
+            return None
 
-        for issue in report.issues:
-            if issue.evidence is not None:
-                if issue.evidence.chunk_id:
-                    evidence_ids.append(
-                        issue.evidence.chunk_id
-                    )
+        evidence_ids = self._collect_evidence_ids(
+            report
+        )
 
         issues_data = []
 
@@ -64,11 +111,21 @@ class LLMService:
 
             if issue.evidence is not None:
                 evidence = {
-                    "chunk_id": issue.evidence.chunk_id,
-                    "source": issue.evidence.source,
-                    "page": issue.evidence.page,
-                    "section": issue.evidence.section,
-                    "text": issue.evidence.text,
+                    "chunk_id": (
+                        issue.evidence.chunk_id
+                    ),
+                    "source": (
+                        issue.evidence.source
+                    ),
+                    "page": (
+                        issue.evidence.page
+                    ),
+                    "section": (
+                        issue.evidence.section
+                    ),
+                    "text": (
+                        issue.evidence.text
+                    ),
                 }
 
             issues_data.append(
@@ -76,7 +133,9 @@ class LLMService:
                     "title": issue.title,
                     "severity": issue.severity,
                     "assessment": issue.assessment,
-                    "code_location": issue.code_location,
+                    "code_location": (
+                        issue.code_location
+                    ),
                     "observed_condition": (
                         issue.observed_condition
                     ),
@@ -84,7 +143,9 @@ class LLMService:
                         issue.documented_requirement
                     ),
                     "mismatch": issue.mismatch,
-                    "suggested_fix": issue.suggested_fix,
+                    "suggested_fix": (
+                        issue.suggested_fix
+                    ),
                     "evidence": evidence,
                 }
             )
@@ -161,16 +222,20 @@ Rules:
             if explanation is None:
                 return None
 
-            valid_ids = set(
-                evidence_ids
-            )
-
-            explanation.evidence_ids = [
-                evidence_id
-                for evidence_id
-                in explanation.evidence_ids
-                if evidence_id in valid_ids
-            ]
+            # Fail closed:
+            # Never silently remove fabricated evidence IDs.
+            # If even one cited ID was not supplied by the
+            # retrieval layer, reject the whole explanation.
+            if not self._validate_evidence_ids(
+                explanation,
+                evidence_ids,
+            ):
+                print(
+                    "LLM VALIDATION ERROR: "
+                    "AI explanation cited an "
+                    "unknown evidence ID."
+                )
+                return None
 
             return explanation
 

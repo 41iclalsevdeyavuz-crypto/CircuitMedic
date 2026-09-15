@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 import hashlib
 import json
@@ -8,6 +9,21 @@ from sentence_transformers import SentenceTransformer
 
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+@lru_cache(maxsize=2)
+def get_embedding_model(
+    model_name: str = MODEL_NAME,
+) -> SentenceTransformer:
+    """
+    Reuse the same SentenceTransformer instance
+    within the current Python process.
+
+    Document embeddings are cached separately on disk.
+    """
+    return SentenceTransformer(
+        model_name
+    )
 
 
 @dataclass(frozen=True)
@@ -25,11 +41,15 @@ class SearchResult:
     score: float
 
 
-def load_json_chunks(path: str | Path) -> list[Chunk]:
+def load_json_chunks(
+    path: str | Path,
+) -> list[Chunk]:
     path = Path(path)
 
     data = json.loads(
-        path.read_text(encoding="utf-8")
+        path.read_text(
+            encoding="utf-8"
+        )
     )
 
     chunks = [
@@ -51,10 +71,14 @@ def load_json_chunks(path: str | Path) -> list[Chunk]:
     return chunks
 
 
-def load_markdown_chunks(path: str | Path) -> list[Chunk]:
+def load_markdown_chunks(
+    path: str | Path,
+) -> list[Chunk]:
     path = Path(path)
 
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(
+        encoding="utf-8"
+    )
 
     parts = text.split("## ")
 
@@ -64,7 +88,9 @@ def load_markdown_chunks(path: str | Path) -> list[Chunk]:
         parts[1:],
         start=1,
     ):
-        heading, _, body = part.partition("\n")
+        heading, _, body = part.partition(
+            "\n"
+        )
 
         body = body.strip()
 
@@ -73,7 +99,9 @@ def load_markdown_chunks(path: str | Path) -> list[Chunk]:
 
         chunks.append(
             Chunk(
-                chunk_id=f"{path.stem}_c{index}",
+                chunk_id=(
+                    f"{path.stem}_c{index}"
+                ),
                 source=path.name,
                 page=None,
                 section=heading.strip(),
@@ -111,7 +139,8 @@ class DatasheetRetriever:
     Local semantic retriever using sentence embeddings.
 
     Document embeddings are cached on disk and reused
-    between analyses.
+    between analyses. The SentenceTransformer model
+    instance is shared in memory within the process.
     """
 
     def __init__(
@@ -126,10 +155,14 @@ class DatasheetRetriever:
             )
 
         self.chunks = chunks
-        self.cache_path = Path(cache_path)
+        self.cache_path = Path(
+            cache_path
+        )
         self.model_name = model_name
 
-        self.model = SentenceTransformer(
+        # Reuse the cached model instance instead of
+        # constructing SentenceTransformer repeatedly.
+        self.model = get_embedding_model(
             model_name
         )
 
@@ -151,19 +184,28 @@ class DatasheetRetriever:
             )
 
             cached_fingerprint = str(
-                cached["fingerprint"].item()
+                cached[
+                    "fingerprint"
+                ].item()
             )
 
             cached_model = str(
-                cached["model_name"].item()
+                cached[
+                    "model_name"
+                ].item()
             )
 
-            embeddings = cached["embeddings"]
+            embeddings = cached[
+                "embeddings"
+            ]
 
             if (
-                cached_fingerprint == fingerprint
-                and cached_model == self.model_name
-                and len(embeddings) == len(self.chunks)
+                cached_fingerprint
+                == fingerprint
+                and cached_model
+                == self.model_name
+                and len(embeddings)
+                == len(self.chunks)
             ):
                 return embeddings
 
@@ -187,8 +229,12 @@ class DatasheetRetriever:
         np.savez_compressed(
             self.cache_path,
             embeddings=embeddings,
-            fingerprint=np.array(fingerprint),
-            model_name=np.array(self.model_name),
+            fingerprint=np.array(
+                fingerprint
+            ),
+            model_name=np.array(
+                self.model_name
+            ),
         )
 
         return embeddings
@@ -207,7 +253,9 @@ class DatasheetRetriever:
         )
 
         return cls(
-            chunks=load_json_chunks(path),
+            chunks=load_json_chunks(
+                path
+            ),
             cache_path=cache_path,
         )
 
@@ -225,7 +273,9 @@ class DatasheetRetriever:
         )
 
         return cls(
-            chunks=load_markdown_chunks(path),
+            chunks=load_markdown_chunks(
+                path
+            ),
             cache_path=cache_path,
         )
 
@@ -239,7 +289,7 @@ class DatasheetRetriever:
         Semantic search.
 
         Results below min_score are rejected instead of
-        forcing an unrelated chunk to become "evidence".
+        forcing an unrelated chunk to become evidence.
         """
         if not query.strip():
             return []
@@ -261,14 +311,18 @@ class DatasheetRetriever:
         results = []
 
         for index in order:
-            score = float(scores[index])
+            score = float(
+                scores[index]
+            )
 
             if score < min_score:
                 continue
 
             results.append(
                 SearchResult(
-                    chunk=self.chunks[index],
+                    chunk=self.chunks[
+                        index
+                    ],
                     score=score,
                 )
             )
