@@ -430,9 +430,17 @@ Current limitations include:
 
 ### Demo Video
 
-The final CircuitMedic demo video will be added before submission.
+🎥 **CircuitMedic — AI Copilot for Embedded Hardware & Firmware Debugging | AI Builders Hackathon 2026**
 
----
+Watch the full 3:46 demo:
+
+[https://youtu.be/69w5OnE2sR0](https://youtu.be/69w5OnE2sR0 )
+
+The demo shows the complete CircuitMedic workflow:
+
+**Detect → Retrieve Evidence → Explain → Fix → Re-analyze**
+
+It includes evidence-grounded diagnosis, AI-assisted explanation, recommended fixes, uncertainty checks, and the **3 → 2 → 0 findings** validation workflow.
 
 ## Project Structure
 
