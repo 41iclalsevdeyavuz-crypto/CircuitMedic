@@ -63,7 +63,11 @@ The analyzer also avoids several known false positives, including unrelated LED 
 
 For supported no-echo patterns, CircuitMedic distinguishes between merely checking a value and actually preventing an invalid zero-duration result from being used in a distance calculation.
 
-Trigger timing analysis also handles supported single-line sequences and multiple constant delays between the TRIG `HIGH` and `LOW` operations.
+Trigger timing analysis handles supported single-line sequences, multiple delays, and both `delayMicroseconds()` and `delay()` between TRIG `HIGH` and `LOW`. Literal integers and simple immutable `const`/`constexpr` integer expressions are supported. Runtime parameters and mutable values are not treated as constants.
+
+Calls are read independently of line breaks. Comments, quoted strings, character literals, and raw strings are excluded while preserving source locations. No-echo analysis follows simple `if`/`else` branches: a conditional return only protects the path on which it executes, and a guarded conversion cannot hide a later unguarded conversion. A second measurement requires its own guard.
+
+Timing through branches, loops, or arbitrary helper calls is not inferred. No-echo analysis is limited to direct assignments from `pulseIn()` and recognizable arithmetic uses of that result; it does not follow aliases or values across functions. Unsupported patterns require manual review, even when the report has no findings.
 
 ---
 
@@ -305,6 +309,12 @@ Then open the local Streamlit address displayed in the terminal.
 python -m pytest -q
 ```
 
+The analyzer regression tests can also run without installing the retrieval or AI dependencies:
+
+```bash
+python -m unittest discover -s tests -p test_analyzer_reliability.py -v
+```
+
 The automated test suite covers important MVP scenarios including:
 
 - detection of supported issues in the broken HC-SR04 robot example,
@@ -319,6 +329,8 @@ The automated test suite covers important MVP scenarios including:
 - retrieval of HC-SR04 trigger documentation,
 - use of the Arduino `pulseIn()` reference for no-echo behavior,
 - rejection of AI explanations containing unknown evidence IDs.
+
+Additional analyzer regression cases cover multiline calls, same-line guards, conditional returns, later unguarded conversions, millisecond delays, source-like strings, immutable delay constants, variable shadowing, and repeated measurements.
 
 The Streamlit demo workflow is also manually checked before release, including:
 
@@ -411,7 +423,7 @@ Current limitations include:
 - Arduino Uno is the currently supported board context.
 - The analyzer does not perform complete C++ parsing or full program analysis.
 - Complex or dynamic control flow may require manual review.
-- Trigger timing analysis is designed for supported constant-delay patterns rather than arbitrary timing expressions.
+- Trigger timing analysis is designed for straight-line literal/immutable integer delays rather than arbitrary timing expressions. It does not evaluate C++ macros or conditional preprocessing.
 - Pin roles are supplied through TRIG/ECHO symbol names rather than inferred from arbitrary firmware.
 - The tool does not verify electrical wiring or physical hardware faults.
 - Retrieval is limited to the documentation included in the project.
@@ -463,6 +475,7 @@ CircuitMedic/
 │
 ├── tests/
 │   ├── test_diagnostic_engine.py
+│   ├── test_analyzer_reliability.py
 │   ├── test_edge_cases.py
 │   ├── test_llm_service.py
 │   └── test_retriever.py

@@ -1,4 +1,11 @@
-from dataclasses import dataclass
+"""Focused, conservative checks for Arduino HC-SR04 firmware.
+
+This is a small statement reader, not a C++ compiler. It recognizes ordinary
+calls, literal/immutable integer delays, and simple zero guards. It deliberately
+does not infer timing through branches, loops, or arbitrary function calls.
+"""
+from dataclasses import dataclass, field
+import ast
 import re
 
 
@@ -10,401 +17,356 @@ class Finding:
 
 
 def _strip_comments_keep_lines(source: str) -> str:
-    """
-    Removes // and /* ... */ comments while preserving newline positions.
-    This keeps diagnostic line numbers aligned with the original source.
-    """
-    result = []
-    i = 0
-    in_block_comment = False
-
-    while i < len(source):
-        if in_block_comment:
-            if source.startswith("*/", i):
-                in_block_comment = False
-                result.extend("  ")
-                i += 2
-            else:
-                if source[i] == "\n":
-                    result.append("\n")
-                else:
-                    result.append(" ")
-                i += 1
-            continue
-
-        if source.startswith("/*", i):
-            in_block_comment = True
-            result.extend("  ")
-            i += 2
-            continue
-
-        if source.startswith("//", i):
-            while i < len(source) and source[i] != "\n":
-                result.append(" ")
-                i += 1
-            continue
-
-        result.append(source[i])
-        i += 1
-
-    return "".join(result)
-
-
-def _has_valid_no_echo_guard(
-    lines: list[str],
-    pulse_line_index: int,
-    variable: str,
-) -> bool:
-    """
-    Recognizes a few simple no-echo guard styles after pulseIn().
-
-    Supported safe patterns include:
-
-        if (duration == 0) {
-            return;
-        }
-
-        if (duration == 0) return;
-
-        if (duration != 0) {
-            distance = duration / 58.0;
-        }
-
-    A check is not considered safe if execution can continue
-    into an unguarded distance conversion.
-
-    This is intentionally conservative and does not attempt
-    to fully parse arbitrary C++ control flow.
-    """
-    escaped = re.escape(variable)
-
-    following = lines[
-        pulse_line_index + 1:
-        pulse_line_index + 16
-    ]
-
-    text = "\n".join(following)
-
-    conversion_pattern = re.compile(
-        rf"\b{escaped}\b\s*/|"
-        rf"\b{escaped}\b\s*\*"
-    )
-
-    first_conversion = conversion_pattern.search(
-        text
-    )
-
-    # Pattern 1:
-    # if (duration == 0) return;
-    # if (duration <= 0) return;
-    # if (!duration) return;
-    inline_terminating_guard = re.search(
-        (
-            rf"if\s*\(\s*(?:"
-            rf"{escaped}\s*==\s*0|"
-            rf"{escaped}\s*<=\s*0|"
-            rf"!\s*{escaped}"
-            rf")\s*\)"
-            rf"\s*"
-            rf"(?:return\b[^;]*;|continue\s*;|break\s*;)"
-        ),
-        text,
+    """Mask comments AND C++ literals without changing offsets or line numbers."""
+    pattern = re.compile(
+        r'(?P<raw>(?:u8|u|U|L)?R"(?P<delimiter>[^\s()\\]{0,16})\('
+        r'.*?\)(?P=delimiter)")'
+        r'|(?P<string>"(?:\\[\s\S]|[^"\\])*(?:"|$))'
+        r"|(?P<char>'(?:\\[\s\S]|[^'\\])*(?:'|$))"
+        r'|(?P<line>//(?:\\\n|[^\n])*)'
+        r'|(?P<block>/\*[\s\S]*?(?:\*/|$))',
         re.DOTALL,
     )
-
-    if inline_terminating_guard:
-        if (
-            first_conversion is None
-            or inline_terminating_guard.start()
-            < first_conversion.start()
-        ):
-            return True
-
-    # Pattern 2:
-    # if (duration == 0) {
-    #     ...
-    #     return;
-    # }
-    zero_guard = re.search(
-        (
-            rf"if\s*\(\s*(?:"
-            rf"{escaped}\s*==\s*0|"
-            rf"{escaped}\s*<=\s*0|"
-            rf"!\s*{escaped}"
-            rf")\s*\)"
-            rf"\s*\{{"
-        ),
-        text,
+    return pattern.sub(
+        lambda match: ''.join('\n' if c == '\n' else ' ' for c in match[0]),
+        source,
     )
 
-    if zero_guard:
-        open_brace = text.find(
-            "{",
-            zero_guard.start(),
-        )
 
-        if open_brace != -1:
-            depth = 0
-            close_brace = None
+@dataclass
+class _Statement:
+    kind: str
+    text: str
+    start: int
+    body: list['_Statement'] = field(default_factory=list)
+    otherwise: list['_Statement'] = field(default_factory=list)
 
-            for pos in range(
-                open_brace,
-                len(text),
-            ):
-                if text[pos] == "{":
-                    depth += 1
 
-                elif text[pos] == "}":
-                    depth -= 1
+def _closing(text: str, start: int, opening: str = '(', closing: str = ')') -> int:
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == opening:
+            depth += 1
+        elif text[index] == closing:
+            depth -= 1
+            if depth == 0:
+                return index
+    return len(text) - 1
 
-                    if depth == 0:
-                        close_brace = pos
-                        break
 
-            if close_brace is not None:
-                guard_body = text[
-                    open_brace + 1:
-                    close_brace
-                ]
+def _statements(source: str, offset: int = 0) -> list[_Statement]:
+    """Read statement boundaries and if/else bodies, independent of newlines."""
+    def space(index):
+        while index < len(source) and source[index].isspace():
+            index += 1
+        return index
 
-                terminates_flow = re.search(
-                    r"\breturn\b[^;]*;|"
-                    r"\bcontinue\s*;|"
-                    r"\bbreak\s*;",
-                    guard_body,
-                )
+    def one(index):
+        index = space(index)
+        if index >= len(source):
+            return _Statement('simple', '', offset + index), index
+        if source[index] == '{':
+            end = _closing(source, index, '{', '}')
+            return _Statement('block', '', offset + index,
+                              _statements(source[index + 1:end], offset + index + 1)), end + 1
+        control = re.match(r'(if|while|for|switch)\s*\(', source[index:])
+        if control:
+            opening = index + control.end() - 1
+            end = _closing(source, opening)
+            body, after = one(end + 1)
+            alternate = []
+            next_index = space(after)
+            if control[1] == 'if' and re.match(r'else\b', source[next_index:]):
+                other, after = one(next_index + 4)
+                alternate = other.body if other.kind == 'block' else [other]
+            return _Statement(
+                control[1], source[opening + 1:end], offset + opening + 1,
+                body.body if body.kind == 'block' else [body], alternate,
+            ), after
+        # Function headers and ordinary statements. Parentheses may contain
+        # nested calls or semicolons (e.g. a for header).
+        cursor = index
+        while cursor < len(source):
+            char = source[cursor]
+            if char == '(':
+                cursor = _closing(source, cursor) + 1
+                continue
+            if char == '{':
+                end = _closing(source, cursor, '{', '}')
+                return _Statement('block', source[index:cursor], offset + index,
+                                  _statements(source[cursor + 1:end], offset + cursor + 1)), end + 1
+            if char in ';}':
+                return _Statement('simple', source[index:cursor + (char == ';')],
+                                  offset + index), cursor + 1
+            cursor += 1
+        return _Statement('simple', source[index:], offset + index), cursor
 
-                if terminates_flow:
-                    if (
-                        first_conversion is None
-                        or zero_guard.start()
-                        < first_conversion.start()
-                    ):
-                        return True
+    result = []
+    index = 0
+    while space(index) < len(source):
+        statement, after = one(index)
+        if after <= index:
+            break
+        result.append(statement)
+        index = after
+    return result
 
-    # Pattern 3:
-    # if (duration != 0) {
-    #     distance = duration / 58.0;
-    # }
-    #
-    # The conversion itself must be inside the positive guard.
-    positive_guard = re.search(
-        (
-            rf"if\s*\(\s*"
-            rf"{escaped}\s*(?:!=|>)\s*0"
-            rf"\s*\)"
-            rf"\s*\{{"
-        ),
-        text,
+
+def _calls(text: str, name: str):
+    for match in re.finditer(rf'\b{re.escape(name)}\s*\(', text):
+        opening = match.end() - 1
+        end = _closing(text, opening)
+        arguments = text[opening + 1:end]
+        # Split only top-level commas, allowing nested timeout expressions.
+        args, start, depth = [], 0, 0
+        for index, char in enumerate(arguments):
+            if char in '([':
+                depth += 1
+            elif char in ')]':
+                depth -= 1
+            elif char == ',' and depth == 0:
+                args.append(arguments[start:index].strip())
+                start = index + 1
+        args.append(arguments[start:].strip())
+        yield match.start(), end + 1, args
+
+
+def _integer(expression: str, constants: dict[str, int]) -> int | None:
+    """Evaluate a bounded subset of integer expressions without executing code."""
+    expression = re.sub(r'\b(0[xX][0-9a-fA-F]+|\d+)[uUlL]+\b', r'\1', expression.strip())
+    try:
+        node = ast.parse(expression, mode='eval').body
+        def value(part):
+            if isinstance(part, ast.Constant) and type(part.value) is int:
+                return part.value
+            if isinstance(part, ast.Name):
+                return constants[part.id]
+            if isinstance(part, ast.UnaryOp) and isinstance(part.op, (ast.UAdd, ast.USub)):
+                number = value(part.operand)
+                return -number if isinstance(part.op, ast.USub) else number
+            if isinstance(part, ast.BinOp):
+                left, right = value(part.left), value(part.right)
+                if isinstance(part.op, ast.Add):
+                    return left + right
+                if isinstance(part.op, ast.Sub):
+                    return left - right
+                if isinstance(part.op, ast.Mult):
+                    return left * right
+            raise ValueError('Unsupported integer expression')
+        result = value(node)
+        return result if abs(result) <= 2**63 - 1 else None
+    except (SyntaxError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+
+
+def _learn_constant(text: str, constants: dict[str, int]) -> None:
+    # Ordinary declarations shadow outer constants, even if they are mutable.
+    declaration = re.match(
+        r'\s*(?P<type>(?:(?:const|constexpr|static|unsigned|signed|long|short)\s+)*'
+        r'(?:int|long|short|auto|uint\d+_t|size_t))\s+'
+        r'(?P<name>\w+)\s*(?:=\s*(?P<value>[^;]+))?\s*;', text,
     )
-
-    if positive_guard:
-        open_brace = text.find(
-            "{",
-            positive_guard.start(),
-        )
-
-        if open_brace != -1:
-            depth = 0
-            close_brace = None
-
-            for pos in range(
-                open_brace,
-                len(text),
-            ):
-                if text[pos] == "{":
-                    depth += 1
-
-                elif text[pos] == "}":
-                    depth -= 1
-
-                    if depth == 0:
-                        close_brace = pos
-                        break
-
-            if close_brace is not None:
-                guard_body = text[
-                    open_brace + 1:
-                    close_brace
-                ]
-
-                guarded_conversion = (
-                    conversion_pattern.search(
-                        guard_body
-                    )
-                )
-
-                if guarded_conversion:
-                    return True
-
-    return False
+    if declaration:
+        name = declaration['name']
+        result = _integer(declaration['value'] or '', constants)
+        constants.pop(name, None)
+        if re.search(r'\b(?:const|constexpr)\b', declaration['type']) and result is not None:
+            constants[name] = result
 
 
-def analyze_hc_sr04(
-    firmware: str,
-    trig_symbol: str = "trigPin",
-    echo_symbol: str = "echoPin",
-) -> list[Finding]:
+def _trigger_findings(nodes: list[_Statement], source: str, trig: str,
+                      inherited: dict[str, int] | None = None) -> list[Finding]:
+    constants = dict(inherited or {})
     findings = []
-
-    cleaned = _strip_comments_keep_lines(firmware)
-    lines = cleaned.splitlines()
-
-    trig_escaped = re.escape(trig_symbol)
-    echo_escaped = re.escape(echo_symbol)
-
-        # A. Analyze the selected TRIG pin between HIGH and the next LOW.
-    # Constant delayMicroseconds() calls in that interval are summed.
-    #
-    # This supports both:
-    #
-    # digitalWrite(trigPin, HIGH);
-    # delayMicroseconds(4);
-    # digitalWrite(trigPin, LOW);
-    #
-    # and:
-    #
-    # digitalWrite(trigPin, HIGH); delayMicroseconds(4); digitalWrite(trigPin, LOW);
-
-    trigger_high_pattern = re.compile(
-        rf"digitalWrite\s*\(\s*{trig_escaped}\s*,\s*HIGH\s*\)\s*;"
-    )
-
-    trigger_low_pattern = re.compile(
-        rf"digitalWrite\s*\(\s*{trig_escaped}\s*,\s*LOW\s*\)\s*;"
-    )
-
-    delay_pattern = re.compile(
-        r"delayMicroseconds\s*\(\s*([^)]+?)\s*\)"
-    )
-
-    # Search the cleaned source as one string so statements on the
-    # same physical line are handled correctly.
-    for high_match in trigger_high_pattern.finditer(cleaned):
-        low_match = trigger_low_pattern.search(
-            cleaned,
-            high_match.end(),
-        )
-
-        if low_match is None:
+    # A pulse can only be assessed within a straight-line statement sequence.
+    pending = None
+    for node in nodes:
+        if node.kind != 'simple':
+            pending = None
+            nested_constants = dict(constants)
+            if node.kind == 'block' and '(' in node.text:
+                # Parameters shadow globals; never substitute a global delay
+                # constant for a runtime parameter with the same name.
+                for name in list(nested_constants):
+                    if re.search(rf'\b{re.escape(name)}\b', node.text):
+                        nested_constants.pop(name)
+            findings.extend(_trigger_findings(node.body, source, trig, nested_constants))
+            findings.extend(_trigger_findings(node.otherwise, source, trig, constants))
             continue
-
-        between = cleaned[
-            high_match.end():
-            low_match.start()
-        ]
-
-        delays = list(
-            delay_pattern.finditer(between)
-        )
-
-        if not delays:
-            # Without an explicit constant delay we do not make
-            # a definite timing claim.
+        _learn_constant(node.text, constants)
+        writes = list(_calls(node.text, 'digitalWrite'))
+        if writes:
+            _, _, args = writes[0]
+            if len(args) == 2 and args[0] == trig:
+                if args[1] == 'HIGH':
+                    pending = {'delay': 0, 'position': None, 'known': True}
+                elif args[1] == 'LOW' and pending is not None:
+                    if pending['known'] and pending['position'] is not None and pending['delay'] < 10:
+                        findings.append(Finding(
+                            'short_trigger_pulse',
+                            source.count('\n', 0, pending['position']) + 1,
+                            f"Total explicit TRIG HIGH delay: {pending['delay']} microseconds",
+                        ))
+                    pending = None
+                else:
+                    pending = None
+            elif pending is not None:
+                pending['known'] = False
             continue
+        if pending is None:
+            continue
+        delays = [(pos, end, args, scale) for name, scale in
+                  [('delayMicroseconds', 1), ('delay', 1000)]
+                  for pos, end, args in _calls(node.text, name)]
+        if delays and re.fullmatch(r'\s*(?:delayMicroseconds|delay)\s*\([\s\S]*\)\s*;', node.text):
+            for pos, _, args, scale in delays:
+                amount = _integer(args[0], constants) if len(args) == 1 else None
+                if amount is None or amount < 0:
+                    pending['known'] = False
+                else:
+                    pending['delay'] += amount * scale
+                    if pending['position'] is None:
+                        pending['position'] = node.start + pos
+        elif node.text.strip():
+            # An arbitrary call or computation may change timing or control flow.
+            pending['known'] = False
+    return findings
 
-        total_delay = 0
-        all_constant = True
 
-        for delay_match in delays:
-            argument = delay_match.group(1).strip()
+# Each state maps a pulse result variable to (call position, known nonzero).
+# Branches retain separate states; a conditional return removes only its branch.
+def _condition(text: str, variable: str) -> bool | None:
+    compact = re.sub(r'\s+', '', text)
+    while compact.startswith('(') and _closing(compact, 0) == len(compact) - 1:
+        compact = compact[1:-1]
+    if compact in {f'{variable}!=0', f'{variable}>0', f'0!={variable}', f'0<{variable}', variable}:
+        return True
+    if compact in {f'{variable}==0', f'{variable}<=0', f'0=={variable}', f'!{variable}'}:
+        return False
+    return None
 
-            if not argument.isdigit():
-                all_constant = False
+
+def _refine(state, condition, truth):
+    result = dict(state)
+    for variable, (position, safe) in state.items():
+        nonzero_when_true = _condition(condition, variable)
+        if nonzero_when_true is not None:
+            nonzero = nonzero_when_true == truth
+            if safe and not nonzero:
+                return None  # This branch contradicts a known nonzero value.
+            result[variable] = (position, nonzero)
+    return result
+
+
+def _merge_states(states):
+    unique = {tuple(sorted(state.items())): state for state in states}
+    if len(unique) <= 64:
+        return list(unique.values())
+    # Bound path growth conservatively: retain every origin, forgetting safety.
+    origins = {(name, origin) for state in states for name, (origin, _) in state.items()}
+    return [{name: (origin, False)} for name, origin in origins]
+
+
+def _no_echo_findings(nodes: list[_Statement], source: str, echo: str) -> list[Finding]:
+    unsafe = set()
+
+    def scoped(sequence, states):
+        # Restore shadowed outer variables when leaving a lexical block.
+        # Inner pulse results are still checked, but cannot certify an outer
+        # measurement or leak into a different function.
+        declared = set()
+        for statement in sequence:
+            if statement.kind == 'simple':
+                match = re.match(
+                    r'\s*(?:(?:const|constexpr|static|unsigned|signed|long|short)\s+)*'
+                    r'(?:int|long|short|float|double|auto|uint\d+_t|size_t)\s+(\w+)\s*(?:=|;)',
+                    statement.text,
+                )
+                if match:
+                    declared.add(match[1])
+        results = []
+        for original in states:
+            local = {name: value for name, value in original.items() if name not in declared}
+            for state in walk(sequence, [local]):
+                for name in declared:
+                    state.pop(name, None)
+                    if name in original:
+                        state[name] = original[name]
+                results.append(state)
+        return _merge_states(results)
+
+    def check_use(text, state):
+        for variable, (origin, safe) in state.items():
+            if not safe and re.search(
+                rf'\b{re.escape(variable)}\b\s*[/*]|[/*]\s*\b{re.escape(variable)}\b', text
+            ):
+                unsafe.add((origin, variable))
+
+    def walk(sequence, states):
+        for node in sequence:
+            if not states:
                 break
-
-            total_delay += int(argument)
-
-        if not all_constant:
-            # Variable or complex timing requires manual review;
-            # do not emit a definite short-pulse diagnosis.
-            continue
-
-        if total_delay < 10:
-            first_delay = delays[0]
-
-            absolute_delay_position = (
-                high_match.end()
-                + first_delay.start()
-            )
-
-            line_number = (
-                cleaned.count(
-                    "\n",
-                    0,
-                    absolute_delay_position,
-                )
-                + 1
-            )
-
-            if len(delays) == 1:
-                observed = (
-                    f"delayMicroseconds({total_delay})"
-                )
+            if node.kind == 'if':
+                branches = []
+                for state in states:
+                    check_use(node.text, state)
+                    for truth, body in [(True, node.body), (False, node.otherwise)]:
+                        refined = _refine(state, node.text, truth)
+                        if refined is not None:
+                            branches.extend(scoped(body, [refined]))
+                states = _merge_states(branches)
+            elif node.kind in {'while', 'for', 'switch'}:
+                for state in states:
+                    check_use(node.text, state)
+                # Loops may execute zero times. A return/break in their body
+                # must never certify the path after the loop as safe.
+                states = _merge_states(states + scoped(node.body, [dict(s) for s in states]))
+            elif node.kind == 'block':
+                # A named function body is independent of other functions.
+                if '(' in node.text:
+                    walk(node.body, [{}])
+                else:
+                    states = scoped(node.body, states)
             else:
-                observed = (
-                    f"Total explicit TRIG HIGH delay: "
-                    f"{total_delay} microseconds"
-                )
+                next_states = []
+                for state in states:
+                    current = dict(state)
+                    for position, end, args in _calls(node.text, 'pulseIn'):
+                        if not args or args[0] != echo:
+                            continue
+                        assignment = re.search(r'\b(\w+)\s*=\s*$', node.text[:position])
+                        if assignment:
+                            current[assignment[1]] = (node.start + position, False)
+                        elif re.match(r'\s*[/*]', node.text[end:]):
+                            unsafe.add((node.start + position, 'pulseIn result'))
+                    check_use(node.text, current)
+                    # An assignment can invalidate a previously established guard.
+                    for variable, (origin, safe) in list(current.items()):
+                        assigned = re.search(rf'\b{re.escape(variable)}\s*=(?!=)([^;]+)', node.text)
+                        if assigned and not re.match(r'\s*pulseIn\s*\(', assigned[1]):
+                            current[variable] = (origin, False)
+                    if not re.match(r'\s*(?:return|throw)\b', node.text):
+                        next_states.append(current)
+                states = _merge_states(next_states)
+        return states
 
-            findings.append(
-                Finding(
-                    "short_trigger_pulse",
-                    line_number,
-                    observed,
-                )
-            )
+    walk(nodes, [{}])
+    return [Finding('unchecked_no_echo', source.count('\n', 0, position) + 1, variable)
+            for position, variable in sorted(unsafe)]
 
-    # B. Ignore commented-out pulseIn() calls.
-    # Also limit timeout detection to the configured ECHO symbol.
-    for index, line in enumerate(lines):
-        call = re.search(
-            rf"pulseIn\s*\(\s*{echo_escaped}\s*,([^)]*)\)",
-            line,
-        )
 
-        if not call:
-            continue
-
-        args = [
-            arg.strip()
-            for arg in f"{echo_symbol},{call.group(1)}".split(",")
-        ]
-
-        if len(args) < 3:
-            findings.append(
-                Finding(
-                    "missing_echo_timeout",
-                    index + 1,
-                    f"pulseIn({', '.join(args)})",
-                )
-            )
-
-    # C. Check whether pulseIn() results are safely guarded before use.
-    assignment_pattern = re.compile(
-        rf"\b(\w+)\s*=\s*pulseIn\s*\(\s*{echo_escaped}\s*,"
-    )
-
-    for index, line in enumerate(lines):
-        assignment = assignment_pattern.search(line)
-
-        if not assignment:
-            continue
-
-        variable = assignment.group(1)
-
-        if not _has_valid_no_echo_guard(lines, index, variable):
-            findings.append(
-                Finding(
-                    "unchecked_no_echo",
-                    index + 1,
-                    variable,
-                )
-            )
-
-    return list(
-        {
-            (finding.kind, finding.line): finding
-            for finding in findings
-        }.values()
-    )
+def analyze_hc_sr04(firmware: str, trig_symbol: str = 'trigPin',
+                   echo_symbol: str = 'echoPin') -> list[Finding]:
+    cleaned = _strip_comments_keep_lines(firmware)
+    # Preprocessor directives are not executable C++. Conditional preprocessing
+    # is outside the supported subset; directives must not merge with statements.
+    cleaned = re.sub(r'^\s*#[^\n]*', lambda m: re.sub(r'[^\n]', ' ', m[0]),
+                     cleaned, flags=re.MULTILINE)
+    nodes = _statements(cleaned)
+    findings = _trigger_findings(nodes, cleaned, trig_symbol)
+    for position, _, args in _calls(cleaned, 'pulseIn'):
+        if args and args[0] == echo_symbol and len(args) < 3:
+            findings.append(Finding('missing_echo_timeout', cleaned.count('\n', 0, position) + 1,
+                                    f"pulseIn({', '.join(args)})"))
+    findings.extend(_no_echo_findings(nodes, cleaned, echo_symbol))
+    return list({(finding.kind, finding.line): finding for finding in findings}.values())
